@@ -340,7 +340,6 @@ public:
 
 private:
   GpuMemory* amd_queue_memory_ = nullptr;
-  uint64_t amd_queue_addr_ = 0;
   bool native_sdma_ = false;
   uint64_t wptr_next_;
   uint64_t wptr_pre_;

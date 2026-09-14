@@ -1176,10 +1176,10 @@ SDMAQueue::SDMAQueue(WDDMDevice* device, void* ring, uint64_t cmdbuf_size, uint3
     auto code = device->CreateGpuMemory(create_info, &gpu_mem);
     assert(code == ErrorCode::Success);
     amd_queue_memory_ = gpu_mem;
-    amd_queue_addr_ = gpu_mem->GpuAddress();
-    std::memset(reinterpret_cast<void*>(amd_queue_addr_), 0, dxg_runtime->page_size);
-    pr_err("[sdma] alloc amd_queue_t gpu_va=0x%" PRIx64 " handle=0x%x\n",
-           amd_queue_addr_, (unsigned)gpu_mem->KmtHandle());
+    pr_err("[sdma] alloc amd_queue_t gpu_va=0x%" PRIx64 " cpu_va=%p match=%d handle=0x%x\n",
+           gpu_mem->GpuAddress(), gpu_mem->CpuAddress(),
+           (int)(reinterpret_cast<uint64_t>(gpu_mem->CpuAddress()) == gpu_mem->GpuAddress()),
+           (unsigned)gpu_mem->KmtHandle());
   }
 
   bool ret = device->CreateQueue(this);
@@ -1217,12 +1217,16 @@ static void SdmaNopFill(void* dst, size_t size_bytes) {
 // both writes the 64-bit progress fence and raises the queue's fence interrupt (pre-Navi4 needs
 // a separate TRAP). Header is exactly 0x80000105: op=FENCE(5), sub_op=CONDITIONAL_INTERRUPT(1),
 // ddw=1 (64-bit fence write); sys/snp/gpa/mall_policy all 0. Per the spec pseudo-code:
-//   FENCE_ADDR = FENCE_REF_ADDR = INTERRUPT_CONTEXT = HwQueueProgressFenceGPUVirtualAddress
+//   FENCE_ADDR = FENCE_REF_ADDR = HwQueueProgressFenceGPUVirtualAddress
 //   FENCE_DATA = HwQueueProgressFenceId
+//   INTERRUPT_CONTEXT = this HwQueue's doorbell offset, as returned by the KMD in
+//                       UMDKMDIF_CREATEHWQUEUE_PRIVATE_DATA (WDDMQueue::aql_doorbell_offset_)
 // The HW writes FENCE_DATA to FENCE_ADDR, then (FENCE_DATA >= *FENCE_REF_ADDR) raises the
-// interrupt so the KMD's existing WDDM fence-reporting path advances the OS fence.
+// interrupt so the KMD's existing WDDM fence-reporting path advances the OS fence. The KMD
+// uses INTERRUPT_CONTEXT to identify which HwQueue the interrupt belongs to.
 #if 1
-static size_t SdmaFenceCondIntPacket(void* dst, uint64_t fence_va, uint64_t fence_val) {
+static size_t SdmaFenceCondIntPacket(void* dst, uint64_t fence_va, uint64_t fence_val,
+                                     uint32_t interrupt_context) {
   // SDMA_PKT_FENCE_CONDITIONAL_INTERRUPT in drivers\drivers\ubm\gfx12\gfx12_sdma_pkt_struct.h
   uint32_t* dw = reinterpret_cast<uint32_t*>(dst);
   dw[0] = 0x80000105u;                             // op=5, sub_op=1, ddw=1 (sys=0)
@@ -1232,11 +1236,12 @@ static size_t SdmaFenceCondIntPacket(void* dst, uint64_t fence_va, uint64_t fenc
   dw[4] = static_cast<uint32_t>(fence_val >> 32);  // FENCE_DATA hi
   dw[5] = static_cast<uint32_t>(fence_va);         // FENCE_REF_ADDR lo
   dw[6] = static_cast<uint32_t>(fence_va >> 32);   // FENCE_REF_ADDR hi
-  dw[7] = static_cast<uint32_t>(fence_va);         // INTERRUPT_CONTEXT (low 32 of fence VA)
+  dw[7] = interrupt_context;                       // INTERRUPT_CONTEXT (doorbell offset)
   return 32;
 }
 #else
-static size_t SdmaFenceCondIntPacket(void* dst, uint64_t fence_va, uint64_t fence_val) {
+static size_t SdmaFenceCondIntPacket(void* dst, uint64_t fence_va, uint64_t fence_val,
+                                     uint32_t interrupt_context) {
   // SDMA_PKT_FENCE_CONDITIONAL_INTERRUPT in drivers\drivers\ubm\gfx12\gfx12_sdma_pkt_struct.h
   uint32_t* dw = reinterpret_cast<uint32_t*>(dst);
   //dw[0] = 0x80000105u;                            // op=5, sub_op=1, ddw=1 (sys=0)
@@ -1247,7 +1252,7 @@ static size_t SdmaFenceCondIntPacket(void* dst, uint64_t fence_va, uint64_t fenc
   dw[4] = static_cast<uint32_t>(fence_val >> 32);   // FENCE_DATA hi
   dw[5] = 0; //static_cast<uint32_t>(fence_va);     // FENCE_REF_ADDR lo
   dw[6] = 0; //static_cast<uint32_t>(fence_va >> 32);  // FENCE_REF_ADDR hi
-  dw[7] = 0; //static_cast<uint32_t>(fence_va);        // INTERRUPT_CONTEXT (low 32 of fence VA)
+  dw[7] = interrupt_context;                        // INTERRUPT_CONTEXT (doorbell offset)
   return 32;
 }
 #endif
@@ -1276,13 +1281,14 @@ void SDMAQueue::RingDoorbell(uint64_t value) {
     char* ep = ring_base + base;
     size_t n = 0;
     // One Navi4+ FENCE_CONDITIONAL_INTERRUPT packet writes the 64-bit HwQueueProgressFenceId
-    // and raises the queue's fence interrupt (INTERRUPT_CONTEXT = fence VA per spec), so the
-    // KMD's existing WDDM fence-reporting path advances the OS fence for this HwQueue.
-    n += SdmaFenceCondIntPacket(ep + n, fence_va, fence_id);
+    // and raises the queue's fence interrupt, so the KMD's existing WDDM fence-reporting path
+    // advances the OS fence for this HwQueue. INTERRUPT_CONTEXT carries this queue's doorbell
+    // offset (from UMDKMDIF_CREATEHWQUEUE_PRIVATE_DATA) so the KMD can identify the queue.
+    n += SdmaFenceCondIntPacket(ep + n, fence_va, fence_id, aql_doorbell_offset_);
 
     pr_err("[sdma] RingDoorbell native epilogue@0x%" PRIx64 " wptr=0x%" PRIx64
-           " fence_va=0x%" PRIx64 " fence_id=%" PRIu64 " gfx%d\n",
-           value - epilogue, value, fence_va, fence_id, gfx_major);
+           " fence_va=0x%" PRIx64 " fence_id=%" PRIu64 " int_ctx=0x%x gfx%d\n",
+           value - epilogue, value, fence_va, fence_id, aql_doorbell_offset_, gfx_major);
 
     // Overrun is prevented at the producer: its AcquireWriteAddress free-space check
     // now includes the reserved epilogue, so it never submits a span larger than the
