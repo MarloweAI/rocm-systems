@@ -1746,6 +1746,7 @@ rj_add_interposer_test_suite(InterposerDupTest ${_rj_interposer_dup_tests})
 rj_add_interposer_test_suite(
     InterposerDrmTest
     DeviceInfoReportsActiveCuCount
+    OpensWithinCurrentDescriptorLimit
 )
 
 rj_add_interposer_test_suite(

@@ -2719,38 +2719,29 @@ static SyntheticDrmOpenResult open_synthetic_drm_fd(const char *path) {
   if (!backend_lease)
     return {};
 
-  auto raw_drm_fd = InterposerContext::real().memfd_create("rocjitsu_drm", MFD_CLOEXEC);
-  if (raw_drm_fd < 0)
+  // Descriptor identity is tracked explicitly; moving it to a high number only
+  // forces the host to grow its descriptor table after threads have started.
+  const int drm_fd = InterposerContext::real().memfd_create("rocjitsu_drm", MFD_CLOEXEC);
+  if (drm_fd < 0)
     return {true, -1};
-
-  // Use real().fcntl, not the unqualified fcntl: this TU defines the interposed
-  // fcntl with external linkage, so an unqualified call would re-enter our own
-  // hook (reserve_dup_backend/untrack_dup, fd_mutex_) needlessly.
-  int high_fd = InterposerContext::real().fcntl(raw_drm_fd, F_DUPFD_CLOEXEC, 512);
-  int saved_errno = errno;
-  InterposerContext::real().close(raw_drm_fd);
-  if (high_fd < 0) {
-    errno = saved_errno;
-    return {true, -1};
-  }
 
   InterposerContext::DrmFinalRelease displaced;
   try {
     auto drm_lifecycle = InterposerContext::ctx.lock_drm_fd_lifecycle();
     // backend_lease stays OURS across this call: on a throw it is released at this
     // function's scope exit, by which point drm_lifecycle is gone. See track_drm().
-    displaced = InterposerContext::ctx.track_drm(high_fd, render_minor, backend_lease);
+    displaced = InterposerContext::ctx.track_drm(drm_fd, render_minor, backend_lease);
   } catch (const std::exception &) {
     // Not just bad_alloc: unique_lock's constructor can throw system_error, and this
     // is an extern "C" entry point -- letting anything escape into a C caller frame
     // is undefined.
     const int saved_errno = ENOMEM;
-    InterposerContext::real().close(high_fd);
+    InterposerContext::real().close(drm_fd);
     errno = saved_errno;
     return {true, -1};
   }
   InterposerContext::ctx.complete_drm_release(std::move(displaced));
-  return {true, high_fd};
+  return {true, drm_fd};
 }
 
 /// @brief True if @p st describes a device rocJITsu emulates.

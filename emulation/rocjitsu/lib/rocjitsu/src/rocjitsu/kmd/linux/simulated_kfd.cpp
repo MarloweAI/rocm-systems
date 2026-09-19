@@ -1521,9 +1521,9 @@ void *SimulatedKfd::dispatch_mmap(KfdProcess &proc, void *addr, size_t length, i
 
     UniqueDriverFd new_doorbell_fd;
     if (doorbell_fd < 0) {
-      // Retain a private descriptor even when a KFD doorbell allocation supplied
-      // the source. The allocation can be freed independently; this duplicate keeps
-      // the canonical backing valid until the per-process doorbell state is torn down.
+      // Keep our own descriptor when borrowing a KFD doorbell allocation: it may
+      // be freed while the CP still needs the canonical backing. Newly created
+      // backing already has an independent owner and can be transferred directly.
       UniqueDriverFd created_source;
       if (source_doorbell_fd < 0) {
         // Local-mode ROCr can request a doorbell mmap without first allocating a
@@ -1531,11 +1531,11 @@ void *SimulatedKfd::dispatch_mmap(KfdProcess &proc, void *addr, size_t length, i
         created_source.reset(memfd_create("rocjitsu_doorbell", MFD_CLOEXEC | MFD_ALLOW_SEALING));
         if (!created_source)
           return MAP_FAILED;
-        source_doorbell_fd = created_source.get();
       }
-      new_doorbell_fd.reset(safe_fcntl(source_doorbell_fd, F_DUPFD_CLOEXEC, 4096));
-      if (!new_doorbell_fd && created_source)
+      if (created_source)
         new_doorbell_fd = std::move(created_source);
+      else
+        new_doorbell_fd.reset(safe_fcntl(source_doorbell_fd, F_DUPFD_CLOEXEC, 0));
       if (!new_doorbell_fd)
         return MAP_FAILED;
       doorbell_fd = new_doorbell_fd.get();
@@ -1683,14 +1683,9 @@ void *SimulatedKfd::dispatch_mmap(KfdProcess &proc, void *addr, size_t length, i
     // different fds to different callers -- leaving one polling an object that
     // never receives event updates -- besides racing the field itself.
     const int events_fd = proc.event_state_.ensure_backing(length, [&](size_t size) -> int {
-      auto raw_events_fd = memfd_create("rocjitsu_events", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-      if (raw_events_fd < 0)
-        return -1;
-      int backing = safe_fcntl(raw_events_fd, F_DUPFD_CLOEXEC, 4096);
+      const int backing = memfd_create("rocjitsu_events", MFD_CLOEXEC | MFD_ALLOW_SEALING);
       if (backing < 0)
-        backing = raw_events_fd;
-      else
-        libc_passthrough().close(raw_events_fd);
+        return -1;
       {
         std::lock_guard<std::mutex> lk(owned_fds_mutex_);
         owned_fds_.insert(backing);
@@ -2077,33 +2072,26 @@ int SimulatedKfd::alloc_memory_ioctl(KfdProcess &proc, void *arg) {
     alloc.host_ptr = reinterpret_cast<void *>(va);
     map_to_gpu(proc, va, reinterpret_cast<void *>(va), args->size, alloc_mtype);
   } else if (daemon_mode_ || !user_provided_va) {
-    auto raw_fd = memfd_create("rocjitsu_alloc", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (raw_fd >= 0) {
-      alloc.memfd = safe_fcntl(raw_fd, F_DUPFD_CLOEXEC, 4096);
-      if (alloc.memfd < 0)
-        alloc.memfd = raw_fd;
-      else
-        libc_passthrough().close(raw_fd);
+    alloc.memfd = memfd_create("rocjitsu_alloc", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (alloc.memfd >= 0) {
       {
         std::lock_guard<std::mutex> lk(owned_fds_mutex_);
         owned_fds_.insert(alloc.memfd);
       }
-      if (alloc.memfd >= 0) {
-        [[maybe_unused]] auto ft_rc = ftruncate(alloc.memfd, static_cast<off_t>(alloc.size));
-        fallocate(alloc.memfd, 0, 0, static_cast<off_t>(alloc.size));
-        safe_fcntl(alloc.memfd, F_ADD_SEALS, F_SEAL_SHRINK);
+      [[maybe_unused]] auto ft_rc = ftruncate(alloc.memfd, static_cast<off_t>(alloc.size));
+      fallocate(alloc.memfd, 0, 0, static_cast<off_t>(alloc.size));
+      safe_fcntl(alloc.memfd, F_ADD_SEALS, F_SEAL_SHRINK);
 
-        if (daemon_mode_ && !is_doorbell) {
-          auto *mapped =
-              safe_mmap(nullptr, alloc.size, PROT_READ | PROT_WRITE, MAP_SHARED, alloc.memfd, 0);
-          if (mapped != MAP_FAILED) {
-            alloc.host_ptr = mapped;
-            alloc.host_ptr_owned = true;
-            // Driver-owned: this is our memfd, mapped read-write here and held
-            // open, so nothing outside can change its protection or unmap it.
-            map_to_gpu(proc, va, alloc.host_ptr, alloc.size, alloc_mtype,
-                       KfdProcess::HostExtentOwner::Driver);
-          }
+      if (daemon_mode_ && !is_doorbell) {
+        auto *mapped =
+            safe_mmap(nullptr, alloc.size, PROT_READ | PROT_WRITE, MAP_SHARED, alloc.memfd, 0);
+        if (mapped != MAP_FAILED) {
+          alloc.host_ptr = mapped;
+          alloc.host_ptr_owned = true;
+          // Driver-owned: this is our memfd, mapped read-write here and held
+          // open, so nothing outside can change its protection or unmap it.
+          map_to_gpu(proc, va, alloc.host_ptr, alloc.size, alloc_mtype,
+                     KfdProcess::HostExtentOwner::Driver);
         }
       }
     }
@@ -2169,15 +2157,9 @@ bool SimulatedKfd::allocate_scratch_backing(uint32_t process_id, uint64_t gpu_va
     }
   }
 
-  auto raw_fd = memfd_create("rocjitsu_scratch", MFD_CLOEXEC);
-  if (raw_fd < 0)
-    return false;
-
-  int memfd = safe_fcntl(raw_fd, F_DUPFD_CLOEXEC, 4096);
+  const int memfd = memfd_create("rocjitsu_scratch", MFD_CLOEXEC);
   if (memfd < 0)
-    memfd = raw_fd;
-  else
-    libc_passthrough().close(raw_fd);
+    return false;
   {
     std::lock_guard<std::mutex> lk(owned_fds_mutex_);
     owned_fds_.insert(memfd);
@@ -3312,7 +3294,7 @@ bool SimulatedKfd::serialize_queue_debug_waves(uint32_t process_id, uint32_t que
       cu->with_wave_state_locked([&] {
         for (uint32_t i = 0; i < cu->num_wf_slots(); ++i) {
           auto *wave = cu->wf(i);
-          if (wave->debug_stopped() && wave->process_id() == process_id &&
+          if (wave && wave->debug_stopped() && wave->process_id() == process_id &&
               wave->queue_id() == queue_id)
             waves_by_area[area].push_back(build_cwsr_wave_state(*wave, gpu->soc->arch()));
         }
@@ -3836,7 +3818,7 @@ void SimulatedKfd::release_debuggee_state(pid_t target_pid, KfdProcess *target_p
         cu->with_wave_state_locked([&] {
           for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
             auto *wave = cu->wf(slot);
-            if (wave->is_halted() || wave->process_id() != target_proc->process_id() ||
+            if (!wave || wave->is_halted() || wave->process_id() != target_proc->process_id() ||
                 wave->queue_id() != queue_id || wave->fatal_exception_pending())
               continue;
             wave->set_debug_single_step(false);
@@ -4050,7 +4032,7 @@ int SimulatedKfd::resume_debug_queues(KfdProcess *proc, uint32_t *queue_ids, uin
         cu->with_wave_state_locked([&] {
           for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
             auto *wave = cu->wf(slot);
-            if (wave->debug_stopped() && wave->process_id() == proc->process_id() &&
+            if (wave && wave->debug_stopped() && wave->process_id() == proc->process_id() &&
                 wave->queue_id() == context.queue_id) {
               stopped.push_back(wave);
               states_by_area[area].push_back(build_cwsr_wave_state(*wave, gpu->soc->arch()));
@@ -4255,7 +4237,7 @@ int SimulatedKfd::suspend_debug_queues(KfdProcess *proc, uint32_t *queue_ids, ui
         cu->with_wave_state_locked([&] {
           for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
             auto *wave = cu->wf(slot);
-            if (!wave->is_halted() && !wave->debug_suspended() &&
+            if (wave && !wave->is_halted() && !wave->debug_suspended() &&
                 wave->process_id() == process_id && wave->queue_id() == queue.queue_id) {
               wave->set_debug_suspended(true);
               newly_suspended.emplace_back(cu, wave);
@@ -4323,7 +4305,7 @@ void SimulatedKfd::clear_completed_debug_queues(KfdProcess *proc, const uint32_t
         cu->with_wave_state_locked([&] {
           for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
             const auto *wave = cu->wf(slot);
-            if (wave->debug_stopped() && wave->process_id() == process_id &&
+            if (wave && wave->debug_stopped() && wave->process_id() == process_id &&
                 wave->queue_id() == queue_id)
               has_stopped_wave = true;
           }

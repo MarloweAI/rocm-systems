@@ -28,6 +28,7 @@ RJ_DIAGNOSTIC_POP
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <barrier>
@@ -43,6 +44,7 @@ RJ_DIAGNOSTIC_POP
 #include <string>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
@@ -574,6 +576,44 @@ TEST(InterposerDrmTest, DeviceInfoReportsActiveCuCount) {
   EXPECT_EQ(device.cu_active_number, 256u);
 
   EXPECT_EQ(close(drm), 0);
+  EXPECT_EQ(close(kfd), 0);
+}
+
+TEST(InterposerDrmTest, OpensWithinCurrentDescriptorLimit) {
+  int kfd = open_kfd();
+  ASSERT_GE(kfd, 0);
+  ASSERT_TRUE(kfd_version_ok(kfd));
+
+  struct rlimit original {};
+  ASSERT_EQ(getrlimit(RLIMIT_NOFILE, &original), 0);
+  class RestoreLimit {
+  public:
+    explicit RestoreLimit(struct rlimit value) : value_(value) {}
+    ~RestoreLimit() { EXPECT_EQ(setrlimit(RLIMIT_NOFILE, &value_), 0); }
+    RestoreLimit(const RestoreLimit &) = delete;
+    RestoreLimit &operator=(const RestoreLimit &) = delete;
+
+  private:
+    struct rlimit value_;
+  };
+  RestoreLimit restore{original};
+  constexpr rlim_t kSoftNofileLimit = 256;
+  struct rlimit limited = original;
+  limited.rlim_cur = std::min(original.rlim_cur, kSoftNofileLimit);
+  ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &limited), 0);
+
+  // A render open should use an available descriptor, even when 512 is outside
+  // the process limit. Its duplicate must retain routing after the original closes.
+  int drm = open_drm_render();
+  ASSERT_GE(drm, 0);
+  EXPECT_LT(static_cast<rlim_t>(drm), limited.rlim_cur);
+  EXPECT_EQ(fcntl(drm, F_GETFD), FD_CLOEXEC);
+  int duplicate = fcntl(drm, F_DUPFD_CLOEXEC, 0);
+  ASSERT_GE(duplicate, 0);
+  EXPECT_EQ(close(drm), 0);
+  drm_amdgpu_info_device device{};
+  EXPECT_TRUE(query_drm_device_info(duplicate, &device));
+  EXPECT_EQ(close(duplicate), 0);
   EXPECT_EQ(close(kfd), 0);
 }
 
