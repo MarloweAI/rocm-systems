@@ -65,18 +65,15 @@ on:
           Stack key to hold at its configured ref (mode=pr only), passed as
           `coco pr --baseline-stack`. Under --skip-baselines every stack
           otherwise builds the PR head, leaving a perf lane nothing unmoved to
-          measure against. Set it on the build half too, or smoke compiles that
-          stack itself instead of reading it from build's cache.
+          measure against. Set on the build leg too when smoke must hold that
+          stack at baseline; build-only does not run tests.
         type: string
         required: false
         default: ''
       build_only:
         description: >-
           Pass --build-only to `coco pr` (mode=pr only): compile every stack in
-          the job config and run no tests. The paired smoke job runs as a
-          separate caller against the same per-run directory once this one has
-          finished, so it reads those stacks from coco's cache rather than
-          compiling them again.
+          the job config and run no tests.
         type: boolean
         required: false
         default: false
@@ -85,14 +82,14 @@ on:
         type: number
         required: false
         default: 600
-      cleanup_pr_dir:
+      pr_cluster:
         description: >-
-          After a successful smoke leg (mode=pr, not build_only), remove the
-          per-run directory under stage_dir so the cluster reclaims disk without
-          waiting for other matrix legs.
-        type: boolean
+          Cluster key for mode=pr (e.g. ruby64, oci). Build and smoke legs for
+          one cluster pass the same value so they share one workspace tree under
+          .coco-pr/<cluster>/pr-<run_id>. Ignored for mode=run.
+        type: string
         required: false
-        default: false
+        default: ''
     secrets:
       APP_ID:
         description: 'GitHub App ID, used to mint a read token for the coco harness repository.'
@@ -169,27 +166,41 @@ jobs:
           "${COCO_VENV}/bin/coco" --help > /dev/null
           echo "==> coco installed from $(git rev-parse HEAD)"
 
-      # Where coco writes build trees, logs and scripts, and what gets
-      # archived. Periodic runs use the job config's stage_dir as-is; a PR run
-      # appends a per-run subdirectory that the caller deletes once both halves
-      # finish.
-      #
-      # Both halves of one gate resolve the same path, since a cluster's build
-      # and smoke configs declare the same stage_dir, and coco's cache is keyed
-      # on (component, fingerprint, stage_dir) -- sharing it is what lets smoke
-      # reuse build's stacks. Keyed on run id, not run_attempt: "re-run failed
-      # jobs" bumps the attempt without re-running a build that passed, which
-      # would leave the retried smoke job nothing to reuse.
+      # Scheduled runs (mode=run) use advanced.stage_dir from the tRCCL job
+      # config. PR legs share one scratch tree under .coco-pr/<cluster>/;
+      # build and smoke must see the same GITHUB_WORKSPACE (NFS-backed on
+      # these runners). Build recreates the tree; smoke reopens it.
       - name: Resolve coco artifact directory
         id: artifact_dir
         working-directory: ${{ env.COCO_DIR }}/tRCCL
         env:
           MODE: ${{ inputs.mode }}
           JOB: ${{ inputs.job }}
+          PR_CLUSTER: ${{ inputs.pr_cluster }}
+          BUILD_ONLY: ${{ inputs.build_only }}
           COCO_VENV: ${{ env.COCO_DIR }}/venv
+          # run_id, not run_attempt: re-run failed jobs keeps the same tree if
+          # build already passed.
           RUN_SUBDIR: pr-${{ github.run_id }}
         run: |
           set -euo pipefail
+          if [[ "${MODE}" == 'pr' ]]; then
+            if [[ -z "${PR_CLUSTER}" ]]; then
+              echo "::error::mode=pr requires pr_cluster so build and smoke share one output directory."
+              exit 1
+            fi
+            output_dir="${GITHUB_WORKSPACE}/.coco-pr/${PR_CLUSTER}/${RUN_SUBDIR}"
+            if [[ "${BUILD_ONLY}" == "true" ]]; then
+              rm -rf "${output_dir}"
+              mkdir -p "${output_dir}"
+            elif [[ ! -d "${output_dir}" ]]; then
+              echo "::error::Expected ${output_dir} from the build leg; run build first."
+              exit 1
+            fi
+            echo "COCO_OUTPUT=${output_dir}" >> "${GITHUB_ENV}"
+            echo "dir=${output_dir}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
           # initialise_plugins() must run before load_job_config: the
           # type-discriminated union over test configs is built from the
           # plugin registry, and without it every job whose type comes from a
@@ -201,25 +212,6 @@ jobs:
           from coco.core.config import load_job_config
           print(load_job_config(os.environ["JOB"]).advanced.stage_dir or "")
           ')
-          if [[ "${MODE}" == 'pr' ]]; then
-            if [[ -z "${stage_dir}" ]]; then
-              echo "::error::Job ${JOB} has no advanced.stage_dir; mode=pr needs one to derive its per-run directory."
-              exit 1
-            fi
-            output_dir="${stage_dir%/}/${RUN_SUBDIR}"
-            mkdir -p "${output_dir}"
-            # The real bound on growth: the caller's cleanup job only gets a
-            # path when both halves published outputs, which a skipped, failed
-            # or cancelled call does not. The cutoff is far longer than any
-            # gate can take, so it cannot hit a live run. Errors stay visible,
-            # since a sweep that silently stopped working would let the tree
-            # grow until the filesystem filled, but must not fail the gate.
-            find "${stage_dir%/}" -mindepth 1 -maxdepth 1 -type d -name 'pr-*' \
-              -mtime +2 -print -exec rm -rf {} + || true
-            echo "COCO_OUTPUT=${output_dir}" >> "${GITHUB_ENV}"
-            echo "dir=${output_dir}" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
           if [[ -z "${stage_dir}" ]]; then
             echo "::warning::Job ${JOB} has no advanced.stage_dir; artifact will contain console logs only."
           fi
@@ -372,30 +364,30 @@ jobs:
             echo "::endgroup::"
           fi
 
-      - name: Remove the shared per-run directory
-        if: >-
-          inputs.cleanup_pr_dir &&
-          inputs.mode == 'pr' &&
-          inputs.build_only != true &&
-          steps.launch.outcome == 'success'
+      - name: Remove the PR output directory
+        if: always() && inputs.mode == 'pr' && steps.artifact_dir.outputs.dir != ''
         env:
           TARGET: ${{ env.COCO_OUTPUT }}
+          PR_CLUSTER: ${{ inputs.pr_cluster }}
           RUN_SUBDIR: pr-${{ github.run_id }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          LAUNCH_OUTCOME: ${{ steps.launch.outcome }}
         run: |
           set -uo pipefail
-          if [[ -z "${TARGET:-}" || ! -d "${TARGET}" ]]; then
-            echo "Nothing to remove; the age-based sweep will collect any leftovers."
+          if [[ "${BUILD_ONLY}" == "true" && "${LAUNCH_OUTCOME}" == "success" ]]; then
+            echo "Leaving ${TARGET} for the smoke leg."
             exit 0
           fi
-          if [[ "$(basename "${TARGET}")" != "${RUN_SUBDIR}" ]]; then
-            echo "::warning::Refusing to remove ${TARGET}: not this run's directory."
+          expected="${GITHUB_WORKSPACE}/.coco-pr/${PR_CLUSTER}/${RUN_SUBDIR}"
+          if [[ "${TARGET}" != "${expected}" ]]; then
+            echo "::warning::Refusing to remove ${TARGET}: expected ${expected}."
+            exit 0
+          fi
+          if [[ ! -d "${TARGET}" ]]; then
             exit 0
           fi
           rm -rf "${TARGET}" && echo "Removed ${TARGET}" || \
             echo "::warning::Could not fully remove ${TARGET}."
-
-      # Build legs leave COCO_OUTPUT in place for smoke to reuse; smoke deletes
-      # it here when cleanup_pr_dir is set.
       - name: Clean up harness checkout
         if: always()
         run: |
