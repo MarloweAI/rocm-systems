@@ -17,6 +17,7 @@
 #include "rocjitsu/vm/amdgpu/gpu_handles.h"
 #include "rocjitsu/vm/amdgpu/legacy_page_table.h"
 #include "rocjitsu/vm/amdgpu/mtype.h"
+#include "util/distributed_shared_mutex.h"
 #include "util/unique_handle.h"
 
 #include <algorithm>
@@ -26,7 +27,6 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -419,11 +419,11 @@ public:
   const uint64_t *page_table_generation() const { return &page_table_generation_; }
 
   /// @brief Return the lease shared by page-table readers and mutations.
-  std::shared_ptr<std::shared_mutex> page_table_request_mutex() const {
+  std::shared_ptr<util::DistributedSharedMutex> page_table_request_mutex() const {
     return page_table_request_mutex_;
   }
 
-  mutable std::shared_mutex page_table_mutex_;
+  mutable util::DistributedSharedMutex page_table_mutex_;
   PageTable page_table_;
 
   // -- Per-process state --
@@ -586,8 +586,8 @@ private:
   ///          this generation. Mutations hold both page_table_request_mutex_
   ///          and page_table_mutex_; readers hold at least one of those locks,
   ///          so the counter itself does not need atomics.
-  std::shared_ptr<std::shared_mutex> page_table_request_mutex_ =
-      std::make_shared<std::shared_mutex>();
+  std::shared_ptr<util::DistributedSharedMutex> page_table_request_mutex_ =
+      std::make_shared<util::DistributedSharedMutex>();
   uint64_t page_table_generation_{1};
 };
 

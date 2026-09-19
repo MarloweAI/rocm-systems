@@ -183,6 +183,24 @@ public:
   [[nodiscard]] virtual VmAccessOutcome write(VmMemoryDomain domain, uint64_t address,
                                               std::span<const std::byte> bytes) = 0;
 
+  /// @brief Attempt a batched copy without publishing faults or partial results.
+  /// @details A false result leaves the destination unchanged. Backings may
+  /// decline spans they cannot service atomically; callers retry smaller accesses.
+  [[nodiscard]] virtual bool try_read_contiguous(VmMemoryDomain domain, uint64_t address,
+                                                 std::span<std::byte> bytes) {
+    (void)domain;
+    (void)address;
+    (void)bytes;
+    return false;
+  }
+  [[nodiscard]] virtual bool try_write_contiguous(VmMemoryDomain domain, uint64_t address,
+                                                  std::span<const std::byte> bytes) {
+    (void)domain;
+    (void)address;
+    (void)bytes;
+    return false;
+  }
+
   /// @brief Perform one acquire load from naturally aligned backing storage.
   /// @details Loads may be 2, 4, or 8 bytes. The 2-byte form is required by
   /// the AQL packet-header publication protocol.
@@ -451,6 +469,11 @@ public:
   /// @brief Resume a translated write at @p completed_bytes.
   [[nodiscard]] VmAccessOutcome write(uint64_t address, std::span<const std::byte> bytes,
                                       std::size_t &completed_bytes) const;
+  /// @brief Try one non-faulting, indivisible translated span.
+  /// @details Refusal leaves both bytes and backing untouched. It does not
+  /// report a guest fault; the caller must issue its original smaller accesses.
+  [[nodiscard]] bool try_read_contiguous(uint64_t address, std::span<std::byte> bytes) const;
+  [[nodiscard]] bool try_write_contiguous(uint64_t address, std::span<const std::byte> bytes) const;
   [[nodiscard]] AtomicLoadResult atomic_load(uint64_t address, uint32_t width) const;
   [[nodiscard]] VmAccessOutcome atomic_store(uint64_t address, uint32_t width,
                                              uint64_t value) const;
