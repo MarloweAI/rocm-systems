@@ -13,7 +13,6 @@
 
 using namespace rocshmem;
 
-namespace atomic = rocshmem::detail::atomic;
 
 /******************************************************************************
  * DEVICE HELPERS
