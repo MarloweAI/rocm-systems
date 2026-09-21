@@ -69,9 +69,12 @@ All configuration for the test cases is done through the `hip_tests_config.yaml`
 Every test case has its own entry. Currently supported options are:
 - level : Specify to which level the case belongs to (e.g. Level_2 is a standard test)
 - tags : List all Catch2 tags that the case is associated with
-- disabled : List all platforms where the case should be disabled
+- disabled : Temporarily skip the case on the listed targets (a regression or tracked bug that is expected to be re-enabled)
+- unsupported : Permanently skip the case on the listed targets, where the platform, architecture, or backend cannot support it
 The group name is automatically added as a tag for every case.
 Changing the configuration file will retrigger the build, so we have an up to date configuration every time.
+
+`disabled` and `unsupported` share the same syntax and produce the same skip; they differ only in intent (temporary regression versus permanent capability gap). Each takes either a flat list of targets (`[amd_wsl]`) or a mapping with a `targets` list and an optional `reason` string (`{targets: [amd_wsl], reason: why the case cannot run}`). A target is a `<platform>_<os>` label (`amd_linux`, `amd_windows`, `amd_wsl`), an architecture (`gfx1260`), or `asan` for sanitizer builds. See `Unit_hipGraphStreamPool_InstantiateFootprint` in `config/configs/unit/graph.yaml` for a live `unsupported` mapping example.
 
 Example:
 ```yaml
