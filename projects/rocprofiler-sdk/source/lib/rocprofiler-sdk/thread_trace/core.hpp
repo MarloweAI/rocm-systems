@@ -183,7 +183,7 @@ public:
     std::unordered_set<rocprofiler_agent_id_t> configured_agents() const;
 
 private:
-    std::unordered_map<rocprofiler_agent_id_t, std::unique_ptr<ThreadTracerAgent>> agents{};
+    std::unordered_map<rocprofiler_agent_id_t, std::shared_ptr<ThreadTracerAgent>> agents{};
     std::unordered_map<rocprofiler_agent_id_t, thread_trace_parameter_pack>        params{};
 
     mutable std::shared_mutex agents_map_mut{};

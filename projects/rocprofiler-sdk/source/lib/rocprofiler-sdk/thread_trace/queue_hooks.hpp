@@ -49,8 +49,9 @@ write_hook(const hsa::Queue&                                        queue,
            hsa::inst_pkt_t&                                         inst_pkt,
            bool&                                                    is_serialized);
 
-// Explicit replacement for the thread-trace completion callback. Iterates active
-// dispatch_thread_trace contexts and calls each tracer's post_kernel_call.
+// Explicit replacement for the thread-trace completion callback. Iterates registered
+// dispatch_thread_trace contexts so post_kernel_call can still drain packets that were
+// injected before stop_context removed the tracer from the active set.
 void
 signal_completion_hook(const hsa::Queue&                           queue,
                        const hsa::rocprofiler_packet&              kernel_packet,

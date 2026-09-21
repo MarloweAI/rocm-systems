@@ -452,7 +452,7 @@ DispatchThreadTracer::resource_init()
                                rocp_agent->name);
             continue;
         }
-        agents[rocp_agent->id] = std::make_unique<ThreadTracerAgent>(it->second, rocp_agent->id);
+        agents[rocp_agent->id] = std::make_shared<ThreadTracerAgent>(it->second, rocp_agent->id);
     }
 }
 
@@ -520,6 +520,7 @@ DispatchThreadTracer::pre_kernel_call(const hsa::Queue&              queue,
         return {nullptr, parameters.bSerialize};
 
     auto packet = agent.get_start_packet();
+    packet->SetOwner(this);
     post_move_data.fetch_add(1);
     packet->populate_before();
     packet->populate_after();
@@ -539,17 +540,21 @@ DispatchThreadTracer::post_kernel_call(DispatchThreadTracer::inst_pkt_t& aql,
 
         auto* pkt = dynamic_cast<hsa::TraceControlAQLPacket*>(aql_pkt.first.get());
         if(!pkt) continue;
+        if(pkt->GetOwner() != this) continue;
 
-        std::shared_lock<std::shared_mutex> lk(agents_map_mut);
-
-        auto it = agents.find(pkt->GetAgent());
-        if(it == agents.end() || it->second == nullptr) continue;
+        auto agent = std::shared_ptr<ThreadTracerAgent>{};
+        {
+            std::shared_lock<std::shared_mutex> lk(agents_map_mut);
+            auto                                it = agents.find(pkt->GetAgent());
+            if(it == agents.end() || it->second == nullptr) continue;
+            agent = it->second;
+        }
 
         post_move_data.fetch_sub(1);
 
         if(pkt->after_krn_pkt.empty()) continue;
 
-        it->second->iterate_data(pkt->GetHandle(), packet_data.user_data);
+        agent->iterate_data(pkt->GetHandle(), packet_data.user_data);
     }
 }
 
@@ -573,8 +578,15 @@ DispatchThreadTracer::collects_on(rocprofiler_agent_id_t agent_id) const
 bool
 DispatchThreadTracer::intersects(const DispatchThreadTracer& rhs) const
 {
-    std::shared_lock<std::shared_mutex> lk(agents_map_mut);
-    std::shared_lock<std::shared_mutex> lk_rhs(rhs.agents_map_mut);
+    if(this == &rhs)
+    {
+        std::shared_lock<std::shared_mutex> lk(agents_map_mut);
+        return !params.empty();
+    }
+
+    auto lk     = std::shared_lock<std::shared_mutex>{agents_map_mut, std::defer_lock};
+    auto lk_rhs = std::shared_lock<std::shared_mutex>{rhs.agents_map_mut, std::defer_lock};
+    std::lock(lk, lk_rhs);
     for(const auto& [agent_id, _] : params)
     {
         if(rhs.params.count(agent_id) > 0) return true;
@@ -597,13 +609,9 @@ DispatchThreadTracer::start_context() const
 void
 DispatchThreadTracer::stop_context() const
 {
-    // Stop injecting ATT packets before transitioning serialization. Completion hooks remain
-    // reachable for packets already in the queues while the serializer transition drains.
+    // Stop injecting ATT packets before transitioning serialization. Completion hooks continue
+    // to route already-tagged packets via signal_completion_hook even after the context stops.
     if(!enabled.exchange(false, std::memory_order_acq_rel)) return;
-
-    // Drain in-flight dispatches before tearing down serialization so post_kernel_call can
-    // still run while the context remains registered.
-    hsa::queue_controller_sync();
 
     const auto serialization_agents = configured_agents();
     if(auto* controller = hsa::get_queue_controller())

@@ -283,33 +283,43 @@ start_context(rocprofiler_context_id_t context_id)
     if(validate_context(cfg) != ROCPROFILER_STATUS_SUCCESS)
         return ROCPROFILER_STATUS_ERROR_CONTEXT_INVALID;
 
-    auto current_contexts = context_array_t{};
-    for(const auto* itr : get_active_contexts(current_contexts))
-    {
-        if(cfg->context_idx == itr->context_idx)
-        {
-            return ROCPROFILER_STATUS_SUCCESS;
-        }
-        else if(cfg->dispatch_counter_collection && itr->dispatch_counter_collection)
-        {
-            // conflicting context
-            return ROCPROFILER_STATUS_ERROR_CONTEXT_CONFLICT;
-        }
-        else if(cfg->dispatch_thread_trace && itr->dispatch_thread_trace &&
-                cfg->dispatch_thread_trace->intersects(*itr->dispatch_thread_trace))
-        {
-            // Two dispatch ATT contexts can run concurrently as long as they target disjoint
-            // sets of GPU agents. Overlapping agent sets would cross-talk in post_kernel_call.
-            return ROCPROFILER_STATUS_ERROR_CONTEXT_CONFLICT;
-        }
-    }
-
     uint64_t rocp_tot_contexts = get_registered_contexts_impl()->size();
     auto     idx               = rocp_tot_contexts;
     auto&    active_contexts   = get_active_contexts_impl();
+    bool     success           = false;
     {
-        // hold a lock here to prevent multiple threads from finding the same nullptr slot
+        // Hold a lock here so conflict detection, slot selection and publication all see the same
+        // active-context state.
         auto _lk = std::unique_lock<std::mutex>{get_contexts_mutex()};
+
+        for(size_t i = 0; i < active_contexts.size(); ++i)
+        {
+            const auto* itr = active_contexts.at(i).load(std::memory_order_acquire);
+            if(itr == nullptr)
+            {
+                if(idx == rocp_tot_contexts) idx = i;
+                continue;
+            }
+
+            if(cfg->context_idx == itr->context_idx)
+            {
+                return ROCPROFILER_STATUS_SUCCESS;
+            }
+            else if(cfg->dispatch_counter_collection && itr->dispatch_counter_collection)
+            {
+                // conflicting context
+                return ROCPROFILER_STATUS_ERROR_CONTEXT_CONFLICT;
+            }
+            else if(cfg->dispatch_thread_trace && itr->dispatch_thread_trace &&
+                    cfg->dispatch_thread_trace->intersects(*itr->dispatch_thread_trace))
+            {
+                // Two dispatch ATT contexts can run concurrently as long as they target disjoint
+                // sets of GPU agents. Overlapping agent sets would cross-talk in
+                // post_kernel_call.
+                return ROCPROFILER_STATUS_ERROR_CONTEXT_CONFLICT;
+            }
+        }
+
         // try to find a nullptr slot first
         for(size_t i = 0; i < active_contexts.size(); ++i)
         {
@@ -331,21 +341,19 @@ start_context(rocprofiler_context_id_t context_id)
             active_contexts.emplace_back();
         }
 
-        get_num_active_contexts().fetch_add(1, std::memory_order_release);
+        const context* _expected = nullptr;
+        success = active_contexts.at(idx).compare_exchange_strong(
+            _expected, get_registered_context(context_id));
+
+        if(success) get_num_active_contexts().fetch_add(1, std::memory_order_release);
     }
 
     rocprofiler::hsa::queue_interposition::notify_queue_interposition_consumer_context_started(cfg);
-
-    // atomic swap the pointer into the "active" array used internally
-    const context* _expected = nullptr;
-    bool           success   = active_contexts.at(idx).compare_exchange_strong(
-        _expected, get_registered_context(context_id));
 
     if(!success)
     {
         rocprofiler::hsa::queue_interposition::notify_queue_interposition_consumer_context_stopped(
             cfg);
-        get_num_active_contexts().fetch_sub(1, std::memory_order_release);
         return ROCPROFILER_STATUS_ERROR_CONTEXT_NOT_STARTED;
     }
 

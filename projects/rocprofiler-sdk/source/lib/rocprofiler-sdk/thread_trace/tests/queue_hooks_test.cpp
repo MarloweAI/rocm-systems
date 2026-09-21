@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "lib/rocprofiler-sdk/thread_trace/queue_hooks.hpp"
+#include "lib/rocprofiler-sdk/agent.hpp"
 #include "lib/rocprofiler-sdk/context/context.hpp"
 #include "lib/rocprofiler-sdk/counters/tests/hsa_tables.hpp"
 #include "lib/rocprofiler-sdk/hsa/agent_cache.hpp"
@@ -71,20 +72,23 @@ void
 test_init()
 {
     static bool _initialized = false;
-    if(_initialized) return;
-    _initialized = true;
+    if(!_initialized)
+    {
+        _initialized = true;
 
-    HsaApiTable table;
-    table.amd_ext_ = &get_ext_table();
-    table.core_    = &get_api_table();
-    // ThreadTracerAgent reads these globals when resource_init() builds its agent map, so they
-    // have to be populated the same way att_packet_test does.
-    hsa::copy_table(table.core_, 0);
-    hsa::copy_table(table.amd_ext_, 0);
-    agent::construct_agent_cache(&table);
-    ASSERT_TRUE(hsa::get_queue_controller() != nullptr);
-    hsa::get_queue_controller()->init(get_api_table(), get_ext_table());
-    registration::init_logging();
+        HsaApiTable table;
+        table.amd_ext_ = &get_ext_table();
+        table.core_    = &get_api_table();
+        // ThreadTracerAgent reads these globals when resource_init() builds its agent map, so
+        // they have to be populated the same way att_packet_test does.
+        hsa::copy_table(table.core_, 0);
+        hsa::copy_table(table.amd_ext_, 0);
+        agent::construct_agent_cache(&table);
+        ASSERT_TRUE(hsa::get_queue_controller() != nullptr);
+        hsa::get_queue_controller()->init(get_api_table(), get_ext_table());
+        registration::init_logging();
+    }
+
     registration::set_init_status(-1);
     context::push_client(1);
 }
@@ -170,6 +174,95 @@ TEST(ThreadTraceQueueHooks, StopContextInFlightCompletionRoutesViaHookPath)
 
     EXPECT_EQ(tracer.pending_post_moves(), 0)
         << "post_move_data must drain via signal_completion_hook after stop_context";
+
+    registration::set_init_status(1);
+    registration::finalize();
+    context::pop_client(1);
+}
+
+TEST(ThreadTraceQueueHooks, CompletionRoutingStaysWithTheProducingTracer)
+{
+    ASSERT_EQ(hsa_init(), HSA_STATUS_SUCCESS);
+    test_init();
+
+    auto&                  agents    = hsa::get_queue_controller()->get_supported_agents();
+    const hsa::AgentCache* att_agent = nullptr;
+    for(const auto& [_, agent] : agents)
+    {
+        if(!agent.get_rocp_agent()) continue;
+        if(!agent.get_rocp_agent()->runtime_visibility.hsa) continue;
+        att_agent = &agent;
+        break;
+    }
+    if(!att_agent) GTEST_SKIP() << "no ATT-capable GPU agent available";
+
+    struct context_data
+    {
+        rocprofiler_context_id_t           ctx       = {};
+        thread_trace::DispatchThreadTracer* tracer    = nullptr;
+        std::unique_ptr<hsa::HookTestFakeQueue> queue = {};
+        hsa::rocprofiler_packet            pkt       = {};
+        rocprofiler_user_data_t            user_data = {};
+        hsa::inst_pkt_t                    inst_pkt  = {};
+    };
+
+    auto make_context = [&](uint64_t queue_id) {
+        auto data = context_data{};
+        EXPECT_EQ(rocprofiler_create_context(&data.ctx), ROCPROFILER_STATUS_SUCCESS);
+        EXPECT_EQ(rocprofiler_configure_dispatch_thread_trace_service(
+                      data.ctx,
+                      att_agent->get_rocp_agent()->id,
+                      nullptr,
+                      0,
+                      start_stop_dispatch_cb,
+                      [](rocprofiler_thread_trace_shader_data_t, rocprofiler_user_data_t) {},
+                      nullptr),
+                  ROCPROFILER_STATUS_SUCCESS);
+        EXPECT_EQ(rocprofiler_start_context(data.ctx), ROCPROFILER_STATUS_SUCCESS);
+
+        auto* ctx_p = context::get_mutable_registered_context(data.ctx);
+        EXPECT_TRUE(ctx_p && ctx_p->dispatch_thread_trace);
+        ctx_p->dispatch_thread_trace->resource_init();
+        data.tracer = ctx_p->dispatch_thread_trace.get();
+
+        data.queue = std::make_unique<hsa::HookTestFakeQueue>(*att_agent, rocprofiler_queue_id_t{.handle = queue_id});
+        auto corr_id = context::correlation_id{};
+        corr_id.internal = static_cast<int64_t>(queue_id);
+        data.user_data   = rocprofiler_user_data_t{.value = corr_id.internal};
+        bool is_serialized = false;
+        thread_trace::write_hook(
+            *data.queue, data.pkt, 1, 1, &data.user_data, {}, &corr_id, data.inst_pkt, is_serialized);
+        EXPECT_FALSE(data.inst_pkt.empty());
+
+        return data;
+    };
+
+    auto ctx_a = make_context(1001);
+    ASSERT_EQ(rocprofiler_stop_context(ctx_a.ctx), ROCPROFILER_STATUS_SUCCESS);
+
+    auto ctx_b = make_context(1002);
+    EXPECT_EQ(ctx_b.tracer->pending_post_moves(), 1);
+
+    auto sess_a = std::make_shared<hsa::queue_info_session_t>(
+        hsa::queue_info_session_t{.queue = *ctx_a.queue});
+    auto packet_data_a      = hsa::packet_data_t{};
+    packet_data_a.user_data = ctx_a.user_data;
+
+    thread_trace::signal_completion_hook(
+        *ctx_a.queue, ctx_a.pkt, sess_a, packet_data_a, ctx_a.inst_pkt, {});
+
+    EXPECT_EQ(ctx_a.tracer->pending_post_moves(), 0);
+    EXPECT_EQ(ctx_b.tracer->pending_post_moves(), 1);
+
+    ASSERT_EQ(rocprofiler_stop_context(ctx_b.ctx), ROCPROFILER_STATUS_SUCCESS);
+
+    auto sess_b = std::make_shared<hsa::queue_info_session_t>(
+        hsa::queue_info_session_t{.queue = *ctx_b.queue});
+    auto packet_data_b      = hsa::packet_data_t{};
+    packet_data_b.user_data = ctx_b.user_data;
+    thread_trace::signal_completion_hook(
+        *ctx_b.queue, ctx_b.pkt, sess_b, packet_data_b, ctx_b.inst_pkt, {});
+    EXPECT_EQ(ctx_b.tracer->pending_post_moves(), 0);
 
     registration::set_init_status(1);
     registration::finalize();
