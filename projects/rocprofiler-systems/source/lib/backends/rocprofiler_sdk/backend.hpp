@@ -83,6 +83,9 @@ struct backend
     using callback_name_info_t           = Wrapper::callback_name_info_t;
     using buffer_name_info_t             = Wrapper::buffer_name_info_t;
     using record_header_t                = Wrapper::record_header_t;
+    using kernel_dispatch_record_t       = Wrapper::kernel_dispatch_record;
+    using async_correlation_id_t         = Wrapper::async_correlation_id_t;
+    using stream_id_t                    = Wrapper::stream_id;
 
     static constexpr auto           compile_time_version = Wrapper::compile_time_version;
     static constexpr counter_flag_t flag_none            = Wrapper::COUNTER_FLAG_NONE;
@@ -517,6 +520,42 @@ public:
     {
         return Wrapper::get_status_string(status);
     }
+
+    /// Extracts the HIP-stream correlation stashed on the record's external
+    /// correlation id by the kernel-rename service (see roctx_client), leaving the
+    /// record's external id holding the roctx region id for downstream lookups.
+    static stream_id_t get_stream_id(kernel_dispatch_record_t* record)
+    {
+        auto _stream_id = stream_id_t{};
+        if(record->correlation_id.external.ptr != nullptr)
+        {
+            auto* _ecid_data = static_cast<kernel_dispatch_stream_correlation_t*>(
+                record->correlation_id.external.ptr);
+            _stream_id                            = _ecid_data->stream_id;
+            auto _region_id                       = _ecid_data->region_id;
+            record->correlation_id.external.value = _region_id;
+            delete _ecid_data;
+            record->correlation_id.external.ptr = nullptr;
+        }
+        return _stream_id;
+    }
+
+    /// Buffer/async-tracing records (kernel_dispatch, memory_copy, scratch_memory,
+    /// ...) carry a Wrapper::async_correlation_id_t, which has no ancestor field
+    /// (unlike callback-tracing's rocprofiler_correlation_id_t) -- there is no
+    /// parent stack id to report for these records.
+    static std::uint64_t get_parent_stack_id(
+        [[maybe_unused]] const async_correlation_id_t& correlation_id)
+    {
+        return 0;
+    }
+
+private:
+    struct kernel_dispatch_stream_correlation_t
+    {
+        std::uint64_t region_id = 0;
+        stream_id_t   stream_id = {};
+    };
 };
 
 template <typename Wrapper>

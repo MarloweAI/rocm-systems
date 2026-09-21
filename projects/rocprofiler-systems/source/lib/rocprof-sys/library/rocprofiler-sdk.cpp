@@ -110,6 +110,9 @@ using rocprofiler_sdk::wrapper;
 
 using production_backend = backends::rocprofiler_sdk::backend<rocprofiler_sdk::wrapper>;
 
+// NOLINTNEXTLINE(bugprone-throwing-static-initialization)
+extern client_data* g_tool_data;
+
 struct external_dependencies
 {
     using agent_t         = ::rocprofsys::agent;
@@ -155,6 +158,56 @@ struct external_dependencies
 
     static std::int32_t get_pid() { return static_cast<std::int32_t>(::getpid()); }
     static std::int32_t get_ppid() { return static_cast<std::int32_t>(::getppid()); }
+
+    // ─── kernel_dispatch buffered-domain dependencies ────────────────────────────
+    using kernel_dispatch_sample_t = trace_cache::kernel_dispatch_sample;
+    using metadata_registry_t      = trace_cache::metadata_registry;
+    using buffer_storage_t         = trace_cache::buffer_storage_t;
+
+    static constexpr std::string_view kernel_dispatch_category_name =
+        trait::name<category::rocm_kernel_dispatch>::value;
+
+    static metadata_registry_t& get_metadata_registry()
+    {
+        return trace_cache::get_metadata_registry();
+    }
+
+    static buffer_storage_t& get_buffer_storage()
+    {
+        return trace_cache::get_buffer_storage();
+    }
+
+    static std::string_view get_kernel_symbol_name(std::uint64_t kernel_id)
+    {
+        auto symbol = get_metadata_registry().get_kernel_symbol(kernel_id);
+        return symbol.has_value() ? std::string_view{ symbol->kernel_name }
+                                  : std::string_view{};
+    }
+
+    static std::uint64_t get_thread_info_sequent_tid(std::uint64_t tid)
+    {
+        const auto& thread_info_data = thread_info::get(tid, SystemTID);
+        return thread_info_data->index_data->sequent_value;
+    }
+
+    static bool get_use_timemory() { return config::get_use_timemory(); }
+
+    static void write_timemory_bundle(std::string_view name, std::uint64_t tid,
+                                      std::uint64_t elapsed_ns)
+    {
+        using kernel_dispatch_bundle_t =
+            tim::lightweight_tuple<tim::component::wall_clock>;
+
+        auto kernel_dispatch_bundle_data = kernel_dispatch_bundle_t{ name };
+        kernel_dispatch_bundle_data.push(static_cast<std::int64_t>(tid)).start().stop();
+        kernel_dispatch_bundle_data.get(
+            [elapsed_ns](tim::component::wall_clock* wall_clock_data) {
+                wall_clock_data->set_value(static_cast<std::int64_t>(elapsed_ns));
+                wall_clock_data->set_accum(static_cast<std::int64_t>(elapsed_ns));
+            });
+
+        kernel_dispatch_bundle_data.pop();
+    }
 
     // Single source of truth is core/trace_cache/cacheable.hpp's ABSOLUTE constant;
     // kfd_events.hpp never includes that header, so the value is surfaced here.
