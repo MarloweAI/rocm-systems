@@ -74,7 +74,7 @@ Every test case has its own entry. Currently supported options are:
 The group name is automatically added as a tag for every case.
 Changing the configuration file will retrigger the build, so we have an up to date configuration every time.
 
-`disabled` and `unsupported` share the same syntax and produce the same skip; they differ only in intent (temporary regression versus permanent capability gap). Each takes either a flat list of targets (`[amd_wsl]`) or a mapping with a `targets` list and an optional `reason` string (`{targets: [amd_wsl], reason: why the case cannot run}`). A target is a `<platform>_<os>` label (`amd_linux`, `amd_windows`, `amd_wsl`), an architecture (`gfx1260`), or `asan` for sanitizer builds. See `Unit_hipGraphStreamPool_InstantiateFootprint` in `config/configs/unit/graph.yaml` for a live `unsupported` mapping example.
+`disabled` and `unsupported` share the same syntax and produce the same skip; they differ only in intent (temporary regression versus permanent capability gap).
 
 Example:
 ```yaml
