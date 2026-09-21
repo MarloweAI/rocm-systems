@@ -151,6 +151,38 @@ struct kfd_queue_record
     std::uint64_t start_timestamp = 0;
     std::uint64_t end_timestamp   = 0;
 };
+struct kernel_dispatch_record_t
+{
+    std::uint32_t operation = 0;
+    std::int32_t  pid       = 0;
+    agent_id_t    agent_id{};
+    std::uint64_t start_timestamp = 0;
+    std::uint64_t end_timestamp   = 0;
+};
+struct memory_copy_record_t
+{
+    std::uint32_t operation = 0;
+    std::int32_t  pid       = 0;
+    agent_id_t    agent_id{};
+    std::uint64_t start_timestamp = 0;
+    std::uint64_t end_timestamp   = 0;
+};
+struct memory_allocation_record_t
+{
+    std::uint32_t operation = 0;
+    std::int32_t  pid       = 0;
+    agent_id_t    agent_id{};
+    std::uint64_t start_timestamp = 0;
+    std::uint64_t end_timestamp   = 0;
+};
+struct scratch_memory_record_t
+{
+    std::uint32_t operation = 0;
+    std::int32_t  pid       = 0;
+    agent_id_t    agent_id{};
+    std::uint64_t start_timestamp = 0;
+    std::uint64_t end_timestamp   = 0;
+};
 
 // Satisfies policies::domain_service::backend's requirement that
 // get_{buffer,callback}_tracing_names() return a std::ranges::range of entries exposing
@@ -251,6 +283,10 @@ struct mock_sdk
     static constexpr std::size_t     BUFFER_TRACING_KFD_PAGE_FAULT           = 25;
     static constexpr std::size_t     BUFFER_TRACING_KFD_PAGE_MIGRATE         = 26;
     static constexpr std::size_t     BUFFER_TRACING_KFD_QUEUE                = 27;
+    static constexpr std::size_t     BUFFER_TRACING_KERNEL_DISPATCH          = 28;
+    static constexpr std::size_t     BUFFER_TRACING_MEMORY_COPY              = 29;
+    static constexpr std::size_t     BUFFER_TRACING_MEMORY_ALLOCATION        = 30;
+    static constexpr std::size_t     BUFFER_TRACING_SCRATCH_MEMORY           = 31;
     static constexpr std::size_t     CALLBACK_TRACING_CODE_OBJECT            = 1;
     // NOLINTEND(readability-identifier-naming)
 
@@ -262,6 +298,10 @@ struct mock_sdk
     using kfd_page_fault_record         = test_support::kfd_page_fault_record;
     using kfd_page_migrate_record       = test_support::kfd_page_migrate_record;
     using kfd_queue_record              = test_support::kfd_queue_record;
+    using kernel_dispatch_record_t      = test_support::kernel_dispatch_record_t;
+    using memory_copy_record_t          = test_support::memory_copy_record_t;
+    using memory_allocation_record_t    = test_support::memory_allocation_record_t;
+    using scratch_memory_record_t       = test_support::scratch_memory_record_t;
 
     static void create_context(context_id_t* context) { g_mock->create_context(context); }
     static void start_context(context_id_t context) { g_mock->start_context(context); }
