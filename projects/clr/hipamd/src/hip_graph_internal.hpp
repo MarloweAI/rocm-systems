@@ -1437,9 +1437,6 @@ class GraphKernelNode : public GraphNode {
   hipAccessPolicyWindow accessPolicyWindow_;  //!< hipKernelNodeAttributeAccessPolicyWindow
   int cooperative_;                           //!< hipKernelNodeAttributeCooperative
   int priority_;                              //!< hipLaunchAttributePriority
-  bool accessPolicyWindowSet_;                //!< accessPolicyWindow_ was written
-  bool cooperativeSet_;                       //!< cooperative_ was written
-  bool prioritySet_;                          //!< priority_ was written
   ihipExtKernelEvents kernelEvents_;   //!< Events for Ext launch kernel
   bool hasHiddenHeap_;                 //!< Kernel has hidden heap(device side allocation)
   int coopKernel_;                     //!< Launch cooperative kernel
@@ -1477,9 +1474,6 @@ class GraphKernelNode : public GraphNode {
     memset(&accessPolicyWindow_, 0, sizeof(accessPolicyWindow_));
     cooperative_ = 0;
     priority_ = hip::Stream::Priority::Normal;
-    accessPolicyWindowSet_ = false;
-    cooperativeSet_ = false;
-    prioritySet_ = false;
   }
 
  public:
@@ -1748,17 +1742,14 @@ class GraphKernelNode : public GraphNode {
   }
 
   // True when hipLaunchAttributePriority was set on this node.
-  bool HasDeclaredPriority() const { return prioritySet_; }
+  bool HasDeclaredPriority() const { return priority_ != hip::Stream::Priority::Normal; }
 
-  int GetDeclaredPriority() const {
-    return prioritySet_ ? priority_ : static_cast<int>(hip::Stream::Priority::Normal);
-  }
+  int GetDeclaredPriority() const { return priority_; }
 
   // Copy the stream's priority into this node, as CUDA specifies stream capture to do.
   void SetCapturedPriority(int priority) {
     priority_ = std::min(std::max(priority, static_cast<int>(hip::Stream::Priority::High)),
                          static_cast<int>(hip::Stream::Priority::Low));
-    prioritySet_ = true;
     // Logged only for a non-default priority, so an ordinary capture adds no log
     // output at all and stays byte-comparable against an unpatched runtime.
     if (priority_ != hip::Stream::Priority::Normal) {
@@ -1888,10 +1879,9 @@ class GraphKernelNode : public GraphNode {
       accessPolicyWindow_.hitRatio = params->accessPolicyWindow.hitRatio;
       accessPolicyWindow_.missProp = params->accessPolicyWindow.missProp;
       accessPolicyWindow_.num_bytes = params->accessPolicyWindow.num_bytes;
-      accessPolicyWindowSet_ = true;
+
     } else if (attr == hipKernelNodeAttributeCooperative) {
       cooperative_ = params->cooperative;
-      cooperativeSet_ = true;
     } else if (attr == hipLaunchAttributePriority) {
       // Priority::High is the numerically smallest value and Priority::Low the
       // largest, so the valid range is [High, Low] and not [Low, High].
@@ -1900,7 +1890,6 @@ class GraphKernelNode : public GraphNode {
         return hipErrorInvalidValue;
       }
       priority_ = params->priority;
-      prioritySet_ = true;
     } else if (attr == hipLaunchAttributeClusterDimension) {
       dim3 clusterDim = {params->clusterDim.x, params->clusterDim.y, params->clusterDim.z};
       if (clusterDim.x == 0 || clusterDim.y == 0 || clusterDim.z == 0) {
@@ -1946,11 +1935,9 @@ class GraphKernelNode : public GraphNode {
   hipError_t CopyAttr(const GraphKernelNode* srcNode) {
     clusterDim_ = srcNode->clusterDim_;
     accessPolicyWindow_ = srcNode->accessPolicyWindow_;
-    accessPolicyWindowSet_ = srcNode->accessPolicyWindowSet_;
+
     cooperative_ = srcNode->cooperative_;
-    cooperativeSet_ = srcNode->cooperativeSet_;
     priority_ = srcNode->priority_;
-    prioritySet_ = srcNode->prioritySet_;
     return hipSuccess;
   }
 
