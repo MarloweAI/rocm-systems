@@ -342,7 +342,7 @@ start_context(rocprofiler_context_id_t context_id)
         }
 
         const context* _expected = nullptr;
-        success = active_contexts.at(idx).compare_exchange_strong(
+        success                  = active_contexts.at(idx).compare_exchange_strong(
             _expected, get_registered_context(context_id));
 
         if(success) get_num_active_contexts().fetch_add(1, std::memory_order_release);

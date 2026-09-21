@@ -198,12 +198,12 @@ TEST(ThreadTraceQueueHooks, CompletionRoutingStaysWithTheProducingTracer)
 
     struct context_data
     {
-        rocprofiler_context_id_t           ctx       = {};
-        thread_trace::DispatchThreadTracer* tracer    = nullptr;
-        std::unique_ptr<hsa::HookTestFakeQueue> queue = {};
-        hsa::rocprofiler_packet            pkt       = {};
-        rocprofiler_user_data_t            user_data = {};
-        hsa::inst_pkt_t                    inst_pkt  = {};
+        rocprofiler_context_id_t                ctx       = {};
+        thread_trace::DispatchThreadTracer*     tracer    = nullptr;
+        std::unique_ptr<hsa::HookTestFakeQueue> queue     = {};
+        hsa::rocprofiler_packet                 pkt       = {};
+        rocprofiler_user_data_t                 user_data = {};
+        hsa::inst_pkt_t                         inst_pkt  = {};
     };
 
     auto make_context = [&](uint64_t queue_id) {
@@ -225,13 +225,21 @@ TEST(ThreadTraceQueueHooks, CompletionRoutingStaysWithTheProducingTracer)
         ctx_p->dispatch_thread_trace->resource_init();
         data.tracer = ctx_p->dispatch_thread_trace.get();
 
-        data.queue = std::make_unique<hsa::HookTestFakeQueue>(*att_agent, rocprofiler_queue_id_t{.handle = queue_id});
-        auto corr_id = context::correlation_id{};
-        corr_id.internal = static_cast<int64_t>(queue_id);
-        data.user_data   = rocprofiler_user_data_t{.value = corr_id.internal};
+        data.queue = std::make_unique<hsa::HookTestFakeQueue>(
+            *att_agent, rocprofiler_queue_id_t{.handle = queue_id});
+        auto corr_id       = context::correlation_id{};
+        corr_id.internal   = static_cast<int64_t>(queue_id);
+        data.user_data     = rocprofiler_user_data_t{.value = corr_id.internal};
         bool is_serialized = false;
-        thread_trace::write_hook(
-            *data.queue, data.pkt, 1, 1, &data.user_data, {}, &corr_id, data.inst_pkt, is_serialized);
+        thread_trace::write_hook(*data.queue,
+                                 data.pkt,
+                                 1,
+                                 1,
+                                 &data.user_data,
+                                 {},
+                                 &corr_id,
+                                 data.inst_pkt,
+                                 is_serialized);
         EXPECT_FALSE(data.inst_pkt.empty());
 
         return data;
