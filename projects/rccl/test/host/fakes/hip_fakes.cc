@@ -48,6 +48,7 @@ ASSERT_HOOK_MATCHES_PROD(g_hipMemMap,                     hipMemMap);
 ASSERT_HOOK_MATCHES_PROD(g_hipMemSetAccess,               hipMemSetAccess);
 ASSERT_HOOK_MATCHES_PROD(g_hipIpcOpenMemHandle,           hipIpcOpenMemHandle);
 ASSERT_HOOK_MATCHES_PROD(g_hipDeviceGetPCIBusId,          hipDeviceGetPCIBusId);
+ASSERT_HOOK_MATCHES_PROD(g_hipEventRecord,                hipEventRecord);
 
 #undef ASSERT_HOOK_MATCHES_PROD
 
@@ -208,6 +209,7 @@ std::function<hipError_t(int*)> g_hipGetDeviceCount = DefaultHipGetDeviceCount;
 static hipError_t DefaultHipDeviceGetAttribute(int* pi, hipDeviceAttribute_t attr, int device);
 static hipError_t DefaultHipDeviceSetLimit(hipLimit_t limit, size_t value);
 static hipError_t DefaultHipDeviceGetPCIBusId(char* pciBusId, int len, int device);
+static hipError_t DefaultHipEventRecord(hipEvent_t event, hipStream_t stream);
 
 static hipError_t DefaultHipDeviceCanAccessPeer(int* canAccessPeer, int, int)
 {
@@ -538,6 +540,7 @@ void ResetHipFakes()
     g_hipStreamDestroy              = DefaultHipStreamDestroy;
     g_hipThreadExchangeStreamCaptureMode = DefaultHipThreadExchangeStreamCaptureMode;
     g_hipGetLastError               = DefaultHipGetLastError;
+    g_hipEventRecord                = DefaultHipEventRecord;
 }
 
 // ===========================================================================
@@ -646,7 +649,16 @@ hipError_t hipEventCreate(hipEvent_t* event)
 
 hipError_t hipEventDestroy(hipEvent_t)      { return hipSuccess; }  // benign teardown (commFree)
 hipError_t hipEventQuery(hipEvent_t)        { return g_hipAsyncOpsResult; }
-hipError_t hipEventRecord(hipEvent_t, hipStream_t) { return g_hipAsyncOpsResult; }
+
+// Default routes through g_hipAsyncOpsResult so unhooked call sites (e.g. the CE
+// proxy-progress copy pump) behave as before; tests that need to drive event
+// recording on its own install a g_hipEventRecord hook.
+static hipError_t DefaultHipEventRecord(hipEvent_t, hipStream_t) { return g_hipAsyncOpsResult; }
+std::function<hipError_t(hipEvent_t, hipStream_t)> g_hipEventRecord = DefaultHipEventRecord;
+hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream)
+{
+    return g_hipEventRecord(event, stream);
+}
 
 hipError_t hipExtMallocWithFlags(void** ptr, size_t size, unsigned int flags)
 {
