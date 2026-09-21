@@ -17,6 +17,7 @@
 #include "library/rocprofiler-sdk/buffered/kfd/queue.hpp"
 #include "library/rocprofiler-sdk/buffered/memory_allocation.hpp"
 #include "library/rocprofiler-sdk/buffered/memory_copy.hpp"
+#include "library/rocprofiler-sdk/buffered/scratch_memory.hpp"
 
 #include "library/rocprofiler-sdk/callback/code_object.hpp"
 
@@ -121,7 +122,7 @@ struct registry
 private:
     consteval static auto collect_buffered_domains()
     {
-        constexpr auto k_buffered_domains_size = 11;
+        constexpr auto k_buffered_domains_size = 12;
         simple_static_vector<buffered_domain_definition<SdkBackend>,
                              k_buffered_domains_size>
             result;
@@ -129,6 +130,7 @@ private:
         result.add(buffered::k_kernel_dispatch<SdkBackend, Externals>);
         result.add(buffered::k_memory_copy<SdkBackend, Externals>);
         result.add(buffered::k_memory_allocation<SdkBackend, Externals>);
+        result.add(buffered::k_scratch_memory<SdkBackend, Externals>);
 
         if constexpr(version::from_formatted(SdkBackend::compile_time_version) >=
                      version{ .major = 1, .minor = 2, .patch = 2 })
