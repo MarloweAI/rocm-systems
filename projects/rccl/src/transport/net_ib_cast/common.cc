@@ -65,10 +65,6 @@ ncclResult_t IbCastBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend)
   baseComm->ready = 0;
 
   NCCLCHECK(IbCastResiliencyInit(baseComm, &baseComm->resiliency));
-  // useCtsOffload is a send/recv-comm field, not known until connect/accept.
-  // Apply control + resiliency/QP-sched here; CTS offload is applied when that
-  // per-comm flag is set.
-  IbCastInitOptRecvCompletion(baseComm, false);
 
   return ncclSuccess;
 }
@@ -195,15 +191,6 @@ void* IbCastAsyncThreadMain(void* args) {
   }
   return NULL;
 }
-
-extern "C" ncclResult_t ncclIbCastGetOptRecvCompletion(void* comm, int* out) {
-  if (!comm || !out) return ncclInvalidArgument;
-  struct ncclIbNetCommBase* base = (struct ncclIbNetCommBase*)comm;
-  *out = base->optRecvCompletion ? 1 : 0;
-  return ncclSuccess;
-}
-
-ncclNet_t netIbCast = {
   "IB-CAST",
   IbCastInit,
   IbCastDevices,
