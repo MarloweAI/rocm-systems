@@ -84,6 +84,7 @@ struct backend
     using buffer_name_info_t             = Wrapper::buffer_name_info_t;
     using record_header_t                = Wrapper::record_header_t;
     using kernel_dispatch_record_t       = Wrapper::kernel_dispatch_record;
+    using memory_copy_record_t           = Wrapper::memory_copy_record;
     using async_correlation_id_t         = Wrapper::async_correlation_id_t;
     using stream_id_t                    = Wrapper::stream_id;
 
@@ -524,20 +525,21 @@ public:
     /// Extracts the HIP-stream correlation stashed on the record's external
     /// correlation id by the kernel-rename service (see roctx_client), leaving the
     /// record's external id holding the roctx region id for downstream lookups.
-    static stream_id_t get_stream_id(kernel_dispatch_record_t* record)
+    template <typename RecordT>
+    static stream_id_t get_stream_id(RecordT* record)
     {
-        auto _stream_id = stream_id_t{};
+        auto stream_id = stream_id_t{};
         if(record->correlation_id.external.ptr != nullptr)
         {
-            auto* _ecid_data = static_cast<kernel_dispatch_stream_correlation_t*>(
+            auto* ecid_data = static_cast<kernel_dispatch_stream_correlation_t*>(
                 record->correlation_id.external.ptr);
-            _stream_id                            = _ecid_data->stream_id;
-            auto _region_id                       = _ecid_data->region_id;
-            record->correlation_id.external.value = _region_id;
-            delete _ecid_data;
+            stream_id                             = ecid_data->stream_id;
+            auto region_id                        = ecid_data->region_id;
+            record->correlation_id.external.value = region_id;
+            delete ecid_data;
             record->correlation_id.external.ptr = nullptr;
         }
-        return _stream_id;
+        return stream_id;
     }
 
     /// Buffer/async-tracing records (kernel_dispatch, memory_copy, scratch_memory,
@@ -548,6 +550,34 @@ public:
         [[maybe_unused]] const async_correlation_id_t& correlation_id)
     {
         return 0;
+    }
+
+    static std::uint64_t get_memory_copy_dst_address(
+        [[maybe_unused]] const memory_copy_record_t& record)
+    {
+        constexpr auto k_version_700 = 700;
+        if constexpr(Wrapper::compile_time_version >= k_version_700)
+        {
+            return record.dst_address.value;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+    static std::uint64_t get_memory_copy_src_address(
+        [[maybe_unused]] const memory_copy_record_t& record)
+    {
+        constexpr auto k_version_700 = 700;
+        if constexpr(Wrapper::compile_time_version >= k_version_700)
+        {
+            return record.src_address.value;
+        }
+        else
+        {
+            return 0;
+        }
     }
 
 private:
