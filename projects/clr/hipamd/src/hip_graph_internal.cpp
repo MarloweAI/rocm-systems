@@ -1545,6 +1545,22 @@ bool GraphExecSegmented::ShouldCollapseToSingleStream() const {
   if (min_overlap == 0) return false;            // gate disabled
   if (segments_.size() < 2) return false;        // nothing to parallelize
 
+  // Graphs with several distinct branches have enough work to amortize their
+  // synchronization even when each kernel's launch grid is small. The
+  // occupancy estimate below cannot see loop work inside those kernels.
+  if (segments_.size() >= 3) {
+    size_t nodes = 0;
+    for (const auto& segment : segments_) nodes += segment.nodes.size();
+    bool has_parallel_level = false;
+    for (const auto& level_segments : segments_per_level_) {
+      if (level_segments.second.size() >= 2) {
+        has_parallel_level = true;
+        break;
+      }
+    }
+    if (nodes >= 4 && has_parallel_level) return false;
+  }
+
   const int dev0 = segments_.front().dev_id;
   for (const auto& seg : segments_) {
     if (seg.dev_id != dev0) return false;
