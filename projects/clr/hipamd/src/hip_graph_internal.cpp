@@ -1132,9 +1132,6 @@ hipError_t GraphExecBase::CreateStreams(uint32_t num_streams, int devId) {
   ClPrint(amd::LOG_INFO, amd::LOG_CODE, "[hipGraph] Creating %u parallel streams for device %d",
           max_streams, devId);
   parallel_streams_[devId].reserve(max_streams);
-  // Track queue IDs already assigned to earlier internal streams so each new
-  // stream avoids colliding with them at creation time.
-  std::unordered_set<uint64_t> used_qids;
   for (uint32_t i = 0; i < max_streams; ++i) {
     auto stream = new hip::Stream(g_devices[devId], hip::Stream::Priority::Normal,
                                   hipStreamNonBlocking);
@@ -1151,14 +1148,11 @@ hipError_t GraphExecBase::CreateStreams(uint32_t num_streams, int devId) {
       return hipErrorOutOfMemory;
     }
 
-    // Pin the queue so dynamic queue management won't release it between launches
-    stream->vdev()->PinQueue();
-    // Acquire a queue that doesn't collide with previously created internal streams.
-    // On the first stream (used_qids empty) this is a normal acquisition.
-    if (!used_qids.empty()) {
-      stream->vdev()->ReacquireQueueExcluding(used_qids);
-    }
-    used_qids.insert(stream->getQueueID());
+    // Graph executables may outlive their last launch. Give an idle internal
+    // stream's queue back to the dynamic pool instead of occupying a queue
+    // for the entire graph lifetime. UpdateStreams resolves queue collisions
+    // against the launch stream and other internal streams on every launch.
+    stream->vdev()->ReleaseHwQueue();
 
     parallel_streams_[devId].push_back(stream);
   }
@@ -1194,17 +1188,9 @@ hipError_t GraphExecBase::EnsureCrossDeviceStream() {
   }
 
   auto& parallel_streams = parallel_streams_[captureDeviceId_];
-  stream->vdev()->PinQueue();
-  // Avoid colliding with the queues already held by the capture-device pool.
-  std::unordered_set<uint64_t> used_qids;
-  for (auto* existing : parallel_streams) {
-    if (existing != nullptr) {
-      used_qids.insert(existing->getQueueID());
-    }
-  }
-  if (!used_qids.empty()) {
-    stream->vdev()->ReacquireQueueExcluding(used_qids);
-  }
+  // Queue assignment is resolved with the rest of the capture-device pool
+  // when a cross-device launch uses this stream.
+  stream->vdev()->ReleaseHwQueue();
 
   // Owned by parallel_streams_, so ~GraphExecBase() tears it down with the rest.
   parallel_streams.push_back(stream);
