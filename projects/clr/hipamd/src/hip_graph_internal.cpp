@@ -1557,6 +1557,33 @@ bool GraphExecSegmented::ShouldCollapseToSingleStream() const {
     const auto& dinfo = g_devices[dev0]->devices()[0]->info();
     machine_threads = static_cast<size_t>(dinfo.maxComputeUnits_) * dinfo.maxThreadsPerCU_;
   }
+  // Two independent, substantial kernel chains can also amortize the
+  // cross-stream signals. Require a full machine wave on each branch so
+  // short chains of tiny kernels still use the cheaper single-stream path.
+  if (segments_.size() == 2 && machine_threads != 0) {
+    size_t nodes = 0;
+    for (const auto& segment : segments_) nodes += segment.nodes.size();
+    bool parallel = false;
+    for (const auto& level_segments : segments_per_level_) {
+      if (level_segments.second.size() == 2) {
+        parallel = true;
+        break;
+      }
+    }
+    auto has_full_wave = [machine_threads](const Segment& segment) {
+      for (Node node : segment.nodes) {
+        if (node != nullptr && node->GetType() == hipGraphNodeTypeKernel &&
+            static_cast<GraphKernelNode*>(node)->GetLaunchThreadCount() >= machine_threads) {
+          return true;
+        }
+      }
+      return false;
+    };
+    if (nodes >= 4 && parallel && has_full_wave(segments_[0]) &&
+        has_full_wave(segments_[1])) {
+      return false;
+    }
+  }
   auto node_work = [machine_threads](Node n) -> size_t {
     if (n == nullptr || n->GetType() != hipGraphNodeTypeKernel) return 1;
     const size_t threads = static_cast<GraphKernelNode*>(n)->GetLaunchThreadCount();
