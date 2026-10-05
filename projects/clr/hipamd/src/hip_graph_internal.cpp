@@ -2707,7 +2707,11 @@ amd::Command* GraphExecSegmented::EnqueueSegmentedGraph(hip::Stream* launch_stre
           if (seg_stream != launch_stream) {
             auto marker = new amd::Marker(*seg_stream, true, launch_wait_list);
             if (marker != nullptr) {
-              marker->setCommandEntryScope(amd::Device::kCacheStateIgnore);
+              // A deep graph can reuse data across many dependent levels. Keep its
+              // entry cache scope; short parallel graphs avoid the extra flush.
+              if (max_dependency_level_ <= 4) {
+                marker->setCommandEntryScope(amd::Device::kCacheStateIgnore);
+              }
               marker->enqueue();
               marker->release();
             }
